@@ -1,2 +1,2 @@
 from .model import PoseBody25
-from .posebody25detector import PoseBody25Detector
+from .detector import PoseBody25Detector

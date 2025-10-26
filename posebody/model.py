@@ -1,75 +1,6 @@
 import torch
 from torch import nn
 from collections import OrderedDict
-import numpy as np
-from keys_map import keys_map
-
-
-def load_dict_from_npy(weight_file):
-    map_from_np2ts = keys_map
-
-    try:
-        np_weights_dict = np.load(weight_file, allow_pickle=True).item()
-    except:
-        np_weights_dict = np.load(weight_file, allow_pickle=True, encoding='bytes').item()
-
-    ts_weights_dict = {}
-
-    for k, v in np_weights_dict.items():
-        ts_k = map_from_np2ts[k]
-        if 'conv' in k:
-            ts_weights_dict[ts_k + '.weight'] = torch.from_numpy(v['weights'])
-            ts_weights_dict[ts_k + '.bias'] = torch.from_numpy(v['bias']).flatten()
-        else:
-            ts_weights_dict[ts_k + '.weight'] = torch.from_numpy(v['weights'])
-    return ts_weights_dict
-
-
-class Joint:
-    def __init__(self, x=-1, y=-1, score: float = 0.):
-        self.data = np.array((x, y, score), dtype=np.float32)
-
-    @property
-    def x(self):
-        return self.data[0]
-
-    @property
-    def y(self):
-        return self.data[1]
-
-    @property
-    def score(self):
-        return self.data[2]
-
-    @property
-    def xy(self):
-        return self.data[:2]
-
-    def get_image_coord(self):
-        return self.data[:2].astype(np.int32)
-
-
-class Skeleton:
-    def __init__(self, joints: list[Joint] = None, num_joints: int = 0, score: float = 0.):
-        self.num_joints = num_joints
-        self.score = score
-        if joints is None:
-            self.joints = [Joint()] * 25
-        else:
-            self.joints = joints
-
-    def get_joints_coord(self) -> np.ndarray:
-        return np.array([joint.xy for joint in self.joints])
-
-    def resize(self, scale):
-        for joint in self.joints:
-            joint.data[:2] *= scale
-
-    def __getitem__(self, item):
-        return self.joints[item]
-
-    def __setitem__(self, key, value: Joint):
-        self.joints[key] = value
 
 
 class SubBlock(nn.Module):
@@ -103,11 +34,11 @@ def block(in_channels, growth_rate, hidden_channels, out_channels):
 
 
 '''
-x   ->  b00 -   -   -   -   -   -   -   -   -   -
-        |       |       |       |       |       |
-        |   ->  b10 ->  b11 ->  b12 ->  b13 -   -   -   -
-                                        |       |       |
-                                        b20 ->  b21 ->  y
+x   ->  b00 ->  -   ->  -   ->  -   ->  -   -   -   ->  -   ->  -
+                |       |       |       |               |       |
+                b10 ->  b11 ->  b12 ->  b13 ->  paf ->  -   ->  -
+                                                        |       |
+                                                        b20 ->  b21 ->  heatmap
 '''
 
 
@@ -152,12 +83,12 @@ class PoseBody25(nn.Module):
         x1 = torch.cat((y0, y1), 1)
         y1 = self.blk12(x1)
         x1 = torch.cat((y0, y1), 1)
-        y1 = self.blk13(x1)
+        paf = self.blk13(x1)
 
         # layer 2
-        x2 = torch.cat((y0, y1), 1)
+        x2 = torch.cat((y0, paf), 1)
         y2 = self.blk20(x2)
-        x2 = torch.cat((y0, y2, y1), 1)
-        y2 = self.blk21(x2)
+        x2 = torch.cat((y0, y2, paf), 1)
+        heatmap = self.blk21(x2)
 
-        return y2, y1
+        return heatmap, paf

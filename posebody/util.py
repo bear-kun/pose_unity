@@ -1,12 +1,11 @@
 import cv2
 import numpy as np
 import math
-import os
 
 from scipy.ndimage.filters import gaussian_filter
 import torch
 
-from model import Joint, Skeleton
+from .dtype import Joint, Skeleton
 
 # 遍历时到关节点和paf_xy的映射
 # 从颈部向四肢和头部关节点的拓扑排序，保证遍历时，当前连接不可能指向已遍历过的关节点
@@ -59,39 +58,38 @@ def draw_body_pose(img: np.ndarray, skeletons: list[Skeleton]):
 
 def pad_down_right_corner(img: np.ndarray) -> np.ndarray:
     stride = 8
-    pad_value = 128
+    pad_val = 128
+
     h, w, _ = img.shape
     pad_d = 0 if h % stride == 0 else stride - h % stride
     pad_r = 0 if w % stride == 0 else stride - w % stride
 
     if pad_d == 0 and pad_r == 0:
-        padded_img = img
-    else:
-        padded_img = cv2.copyMakeBorder(img, 0, pad_d, 0, pad_r, cv2.BORDER_CONSTANT, value=pad_value)
-    return padded_img
+        return img
+    return cv2.copyMakeBorder(img, 0, pad_d, 0, pad_r, cv2.BORDER_CONSTANT, value=(pad_val, pad_val, pad_val))
 
 
-def preprocess_image2tensor(img: np.ndarray, scale: float) -> torch.Tensor:
-    resized_img = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    padded_img = pad_down_right_corner(resized_img)
-    im = np.transpose(np.float32(padded_img), (2, 0, 1)) / 256 - 0.5
-    im = np.ascontiguousarray(im)
+def img2tsr(img: np.ndarray) -> torch.Tensor:
+    padded_img = pad_down_right_corner(img)
+    data = np.transpose(np.float32(padded_img), (2, 0, 1)) / 256 - 0.5  # H, W, C -> C, H, W
+    data = np.ascontiguousarray(data)  # 内存连续
 
-    data = torch.from_numpy(im).float()
-    data.unsqueeze_(0)
-    return data
+    tsr = torch.from_numpy(data)
+    tsr.unsqueeze_(0)
+    return tsr
 
 
-def postprocess_heatmap_paf(heatmap: np.ndarray, paf: np.ndarray, output_shape: (int, int)):
-    def __process(_x: np.ndarray):
-        _y = np.transpose(np.squeeze(_x), (1, 2, 0))
-        _y = cv2.resize(_y, (output_shape[1], output_shape[0]), interpolation=cv2.INTER_CUBIC)
-        return _y.transpose(2, 0, 1)
+def postprocess_heatmap_paf(heatmap: torch.Tensor, paf: torch.Tensor, hw: tuple[int, int]):
+    def _process(_x: torch.Tensor):
+        _y = torch.nn.functional.interpolate(_x, hw, mode='bilinear')
+        _y = _y.cpu().numpy()
+        return _y.squeeze()
 
-    return __process(heatmap), __process(paf)
+    return _process(heatmap), _process(paf)
 
 
 # 返回所有关节点的候选点列表
+# return (NUM_JOINTS, matched_joints)
 def nms_heatmap(heatmaps: np.ndarray, threshold: float) -> list[list[Joint]]:
     joints = []
 
@@ -110,8 +108,7 @@ def nms_heatmap(heatmaps: np.ndarray, threshold: float) -> list[list[Joint]]:
         # 求热图中超过阈值的峰值点，作为关节点的候选点
         peaks_binary = np.logical_and.reduce(
             (smooth_heatmap > threshold, smooth_heatmap >= map_left, smooth_heatmap >= map_right,
-             smooth_heatmap >= map_up,
-             smooth_heatmap >= map_down))  # 逻辑与
+             smooth_heatmap >= map_up, smooth_heatmap >= map_down))  # 逻辑与
 
         peaks = np.argwhere(peaks_binary)
         candidate_joints = [Joint(x, y, heatmap[y, x].item()) for y, x in peaks]
@@ -120,67 +117,76 @@ def nms_heatmap(heatmaps: np.ndarray, threshold: float) -> list[list[Joint]]:
     return joints
 
 
-def connect_joints(joints: list[list[Joint]], paf: np.ndarray, ori_img_w, threshold) -> list[(Joint, Joint, float)]:
-    matched_connections = []
-    mid_num = 10
+class Limb:
+    def __init__(self, joint0, joint1, score):
+        self.j0 = joint0
+        self.j1 = joint1
+        self.score = score
 
-    # 用关节点向量和paf匹配，得到候选躯干
+    def __iter__(self):
+        yield self.j0
+        yield self.j1
+        yield self.score
+
+
+# return (NUM_LIMBS, matched_limbs)
+def match_limbs(joints: list[list[Joint]], paf: np.ndarray, threshold) -> list[list[Limb]]:
+    limbs = []
+
+    # 用关节点向量和paf匹配，得到候选（candidate）躯干
     for joints_idx, paf_idx in zip(map2joints, map2paf):
-        score_mid = paf[paf_idx, :, :]
-        candidate_joint0 = joints[joints_idx[0]]
-        candidate_joint1 = joints[joints_idx[1]]
-        num_joint0 = len(candidate_joint0)
-        num_joint1 = len(candidate_joint1)
-        if num_joint0 != 0 and num_joint1 != 0:
-            candidate_connection = []
-            for joint0 in candidate_joint0:
-                for joint1 in candidate_joint1:
+        paf_xy = paf[paf_idx]
+        cand_joint0 = joints[joints_idx[0]]
+        cand_joint1 = joints[joints_idx[1]]
+
+        if not cand_joint0 or not cand_joint1:
+            limbs.append([])
+        else:
+            cand_limbs = []
+            for joint0 in cand_joint0:
+                for joint1 in cand_joint1:
+                    # 计算单位向量
                     vec = np.subtract(joint1.xy, joint0.xy)
                     norm = np.linalg.norm(vec).item()
                     if norm == 0.:
                         continue
                     vec = np.divide(vec, norm)
 
-                    start_end = zip(np.linspace(joint0.x, joint1.x, num=mid_num),
-                                    np.linspace(joint0.y, joint1.y, num=mid_num))
+                    # 积分
+                    num_dx = 10
+                    bound = zip(np.linspace(joint0.x, joint1.x, num=num_dx),
+                                np.linspace(joint0.y, joint1.y, num=num_dx))
+                    vec_paf = np.array([paf_xy[:, int(round(y)), int(round(x))] for x, y in bound])
+                    cos_vec = np.multiply(vec_paf, vec).sum(axis=1) # cos <vec, vec_paf>
+                    integral = cos_vec.mean().item()
 
-                    vec_paf = np.array([score_mid[:, int(round(y)), int(round(x))] for x, y in start_end])
+                    score = integral # + min(ori_img_w / 2. / norm - 1., 0.)
+                    if score > 0. and len(np.argwhere(cos_vec > threshold)) > 0.8 * num_dx:
+                        cand_limbs.append(Limb(joint0, joint1, score))
 
-                    score_midpoints = np.multiply(vec_paf, vec).sum(axis=1)  # cos <vec, vec_paf>
-                    score_with_dist_prior = (score_midpoints.mean().item() +
-                                             min(ori_img_w / 2. / norm - 1., 0.))
+            cand_limbs = sorted(cand_limbs, key=lambda x: x.score, reverse=True)
+            matched_limbs = []
+            matched_joints = []
+            for limb in cand_limbs:
+                if id(limb.j0) not in matched_joints and id(limb.j1) not in matched_joints:
+                    matched_limbs.append(limb)
+                    matched_joints.append(id(limb.j0))
+                    matched_joints.append(id(limb.j1))
 
-                    if (score_with_dist_prior > 0. and
-                            len(np.argwhere(score_midpoints > threshold)) > 0.8 * mid_num):
-                        candidate_connection.append((joint0, joint1, score_with_dist_prior))
+            limbs.append(matched_limbs)
 
-            candidate_connection = sorted(candidate_connection, key=lambda x: x[2], reverse=True)
-            connection = []
-            matched_joints_id = []
-            for joint0, joint1, score in candidate_connection:
-                if id(joint0) not in matched_joints_id and id(joint1) not in matched_joints_id:
-                    connection.append((joint0, joint1, score))
-                    matched_joints_id.append(id(joint0))
-                    matched_joints_id.append(id(joint1))
-                    if len(connection) >= min(num_joint0, num_joint1):
-                        break
-
-            matched_connections.append(connection)
-        else:
-            matched_connections.append([])
-
-    return matched_connections
+    return limbs
 
 
-def rebuild_skeletons(connections: list[(Joint, Joint, float)]) -> list[Skeleton]:
-    candidate_skeleton = []
+def rebuild_skeletons(limbs: list[list[Limb]]) -> list[Skeleton]:
+    cand_skels = []
 
     # 躯干尝试搭建骨架
-    for (joint0_idx, joint1_idx), connection in zip(map2joints, connections):
-        if not connection:
+    for (joint0_idx, joint1_idx), cand_limbs in zip(map2joints, limbs):
+        if not cand_limbs:
             continue
-        for joint0, joint1, score in connection:
-            for cand_skel in candidate_skeleton:
+        for joint0, joint1, score in cand_limbs:
+            for cand_skel in cand_skels:
                 if cand_skel[joint0_idx] is joint0:
                     # 因为拓扑排序，只可能是id0出现重复，
                     # 而一般id1不可能出现在之前的骨架中，
@@ -195,10 +201,10 @@ def rebuild_skeletons(connections: list[(Joint, Joint, float)]) -> list[Skeleton
                 cand_skel[joint1_idx] = joint1
                 cand_skel.num_joints = 2
                 cand_skel.score = joint0.score + joint1.score + score
-                candidate_skeleton.append(cand_skel)
+                cand_skels.append(cand_skel)
 
     skeletons = []
-    for cand_skel in candidate_skeleton:
+    for cand_skel in cand_skels:
         if cand_skel.score >= 4. and cand_skel.num_joints / cand_skel.score >= 0.4:
             skeletons.append(cand_skel)
 
@@ -225,7 +231,7 @@ def visualize_paf(paf_x: np.ndarray, paf_y: np.ndarray) -> np.ndarray:
             if magnitude > threshold:
                 x_end = int(x + vx * step)
                 y_end = int(y + vy * step)
-                cv2.arrowedLine(img, (x, y), (x_end, y_end), 255, 1, tipLength=0.3)
+                cv2.arrowedLine(img, (x, y), (x_end, y_end), (255,), 1, tipLength=0.3)
 
     return img
 
@@ -248,65 +254,3 @@ def show_heatmaps_paf(heatmap: np.ndarray, paf: np.ndarray):
 
     plt.tight_layout()
     plt.show()
-
-
-def __generate_grid_xy(shape):
-    grid_x = np.tile(np.arange(shape[1], dtype=np.float32), (shape[0], 1))
-    grid_y = np.tile(np.arange(shape[0], dtype=np.float32), (shape[1], 1)).transpose()
-    grid_xy = np.stack((grid_x, grid_y), axis=2)
-    return grid_xy
-
-
-def generate_heatmaps(shape: (int, int), joints_xy: list[list], sigma=5., *,
-                      grid_xy: np.ndarray = None) -> np.ndarray:
-    if grid_xy is None:
-        grid_xy = __generate_grid_xy(shape)
-
-    heatmaps = np.zeros((26, *shape), dtype=np.float32)
-    for joints in joints_xy:
-        for heatmap, xy in zip(heatmaps, joints):
-            if xy is None:
-                continue
-            grid_vec = np.subtract(grid_xy, xy)
-            square_distance = np.sum(np.square(grid_vec), axis=2)
-            gaussian_heatmap = np.exp(-0.5 / sigma ** 2 * square_distance)
-            np.maximum(heatmap, gaussian_heatmap, out=heatmap)
-
-    heatmaps[25] = np.ones(shape, dtype=np.float32) - np.maximum.reduce(heatmaps)  # background
-    return heatmaps
-
-
-def generate_pafs(shape: (int, int), joints_xy: list[list], half_width=5., *, grid_xy: np.ndarray = None) -> np.ndarray:
-    if grid_xy is None:
-        grid_xy = __generate_grid_xy(shape)
-
-    pafs = np.zeros((52, *shape), dtype=np.float32)
-    for joints in joints_xy:
-        for (j0, j1), (_x, _y) in zip(map2joints, map2paf):
-            start = joints[j0]
-            end = joints[j1]
-
-            if start is None or end is None:
-                continue
-
-            vec = np.subtract(end, start)
-            vec_norm = np.linalg.norm(vec)
-            if vec_norm == 0.:
-                continue
-
-            vec_unit = vec / vec_norm
-            grid_vec = np.subtract(grid_xy, start)
-
-            grid_dot = np.dot(grid_vec, vec_unit)
-            grid_cross = np.cross(grid_vec, vec_unit)
-
-            condition = np.logical_and.reduce(
-                (grid_dot > 0., grid_dot < vec_norm, grid_cross > -half_width, grid_cross < half_width))
-
-            paf = pafs[_x:_y + 1]
-            roi = paf[:, condition]
-            vec_o = np.expand_dims(vec_unit, 1) + roi
-            vec_o /= np.linalg.norm(vec_o, axis=0)
-            paf[:, condition] = vec_o
-
-    return pafs
