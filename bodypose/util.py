@@ -1,8 +1,9 @@
-import cv2
 import math
-import torch
+
+import cv2
 import numpy as np
-from scipy.ndimage.filters import gaussian_filter
+import torch
+from torchvision.transforms.functional import gaussian_blur
 
 from .dtype import Joint, Skeleton
 
@@ -78,40 +79,30 @@ def img2tsr(img: np.ndarray) -> torch.Tensor:
     return tsr.unsqueeze_(0)
 
 
-def postprocess_output(output, hw) -> tuple[np.ndarray, np.ndarray]:
-    def _process(_x: torch.Tensor):
-        _y = torch.nn.functional.interpolate(_x, hw, mode='bilinear')
-        _y = _y.cpu().numpy()
-        return _y.squeeze()
-
-    return _process(output[0]), _process(output[1])
+def postprocess_output(output, hw):
+    result = torch.nn.functional.interpolate(output, hw, mode='bilinear').squeeze_(0)
+    return result[:26], result[26:]
 
 
 # 返回所有关节点的候选点列表
 # return (NUM_JOINTS, matched_joints)
-def nms_heatmap(heatmaps: np.ndarray, threshold: float):
-    joints = []
+def nms_heatmap(heatmaps: torch.Tensor, threshold: float):
+    smooth = gaussian_blur(heatmaps[:25], kernel_size=[5, 5])
+    mask = smooth > threshold
 
-    for heatmap in heatmaps[:25]:
-        smooth_heatmap = gaussian_filter(heatmap, sigma=3)
+    mask[:, 1:, :] &= smooth[:, 1:, :] >= smooth[:, :-1, :]
+    mask[:, :-1, :] &= smooth[:, :-1, :] >= smooth[:, 1:, :]
+    mask[:, :, 1:] &= smooth[:, :, 1:] >= smooth[:, :, :-1]
+    mask[:, :, :-1] &= smooth[:, :, :-1] >= smooth[:, :, 1:]
 
-        map_left = np.zeros(smooth_heatmap.shape)
-        map_left[1:, :] = smooth_heatmap[:-1, :]
-        map_right = np.zeros(smooth_heatmap.shape)
-        map_right[:-1, :] = smooth_heatmap[1:, :]
-        map_up = np.zeros(smooth_heatmap.shape)
-        map_up[:, 1:] = smooth_heatmap[:, :-1]
-        map_down = np.zeros(smooth_heatmap.shape)
-        map_down[:, :-1] = smooth_heatmap[:, 1:]
+    indices = torch.nonzero(mask)
+    scores = heatmaps[indices[:, 0], indices[:, 1], indices[:, 2]]
+    indices = indices.cpu().numpy()
+    scores = scores.cpu().numpy()
 
-        # 求热图中超过阈值的峰值点，作为关节点的候选点
-        peaks_binary = np.logical_and.reduce(
-            (smooth_heatmap > threshold, smooth_heatmap >= map_left, smooth_heatmap >= map_right,
-             smooth_heatmap >= map_up, smooth_heatmap >= map_down))  # 逻辑与
-
-        peaks = np.argwhere(peaks_binary)
-        candidate_joints = [Joint(x, y, heatmap[y, x].item()) for y, x in peaks]
-        joints.append(candidate_joints)
+    joints = [[] for _ in range(25)]
+    for i, idx in enumerate(indices):
+        joints[idx[0]].append(Joint(idx[2].item(), idx[1].item(), scores[i].item()))
 
     return joints
 
@@ -129,8 +120,9 @@ class Limb:
 
 
 # return (NUM_LIMBS, matched_limbs)
-def match_limbs(joints, paf: np.ndarray, threshold):
+def match_limbs(joints, paf: torch.Tensor, threshold):
     limbs = []
+    paf = paf.cpu().numpy()
 
     # 用关节点向量和paf匹配，得到候选（candidate）躯干
     for joints_idx, paf_idx in zip(map2joints, map2paf):

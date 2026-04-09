@@ -1,15 +1,16 @@
 import numpy as np
 import torch
-from .model import PoseBody25
-from .dtype import Skeleton
+
 from . import util
+from .model import BodyPose25
+from .dtype import Skeleton
 
 _try_cuda = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-class PoseBody25Detector:
+class BodyPoseDetector:
     def __init__(self, weights_path: str):
-        self.model = PoseBody25()
+        self.model = BodyPose25()
         self.model.load_state_dict(torch.load(weights_path, weights_only=True))
         self.model.eval()
 
@@ -22,8 +23,8 @@ class PoseBody25Detector:
             x = util.img2tsr(img).to(device)
             y = self.model(x)
 
-        heatmap, paf = util.postprocess_output(y, img.shape[:2])
-        joints = util.nms_heatmap(heatmap, threshold_joint)
-        limbs = util.match_limbs(joints, paf, threshold_limb)
-        skeletons = util.rebuild_skeletons(limbs)
+            heatmap, paf = util.postprocess_output(y, img.shape[:2])
+            joints = util.nms_heatmap(heatmap, threshold_joint)
+            limbs = util.match_limbs(joints, paf, threshold_limb)
+            skeletons = util.rebuild_skeletons(limbs)
         return skeletons

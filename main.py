@@ -1,4 +1,4 @@
-from bodypose import PoseBody25Detector
+from bodypose import BodyPoseDetector
 from bodypose.camera import RealSenseCamera
 from bodypose.util import draw_body_pose
 import cv2
@@ -6,7 +6,7 @@ import time
 
 if __name__ == '__main__':
     camera = RealSenseCamera()
-    detector = PoseBody25Detector("weights/pose_body25.pt")
+    detector = BodyPoseDetector("weights/pose_body25.pt")
     K = camera.get_intrinsics()
 
     while True:
@@ -19,8 +19,8 @@ if __name__ == '__main__':
         skels = detector(color_img)
 
         for skel in skels:
-            for joint in skel.joints:
-                x2d, y2d = int(joint.x), int(joint.y)
+            for joint in skel:
+                x2d, y2d = joint.get_image_coord()
                 if 0 <= x2d < depth_img.shape[1] and 0 <= y2d < depth_img.shape[0]:
                     z = depth_img[y2d, x2d]
                     if z <= 0:

@@ -45,9 +45,9 @@ x   ->  b00 ->  -   ->  -   ->  -   ->  -   -   -   ->  -   ->  -
 '''
 
 
-class PoseBody25(nn.Module):
+class BodyPose25(nn.Module):
     def __init__(self):
-        super(PoseBody25, self).__init__()
+        super(BodyPose25, self).__init__()
         self.blk00 = nn.Sequential(OrderedDict(
             conv00=nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, padding=1), relu00=nn.ReLU(),
             conv01=nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1), relu01=nn.ReLU(),
@@ -94,4 +94,4 @@ class PoseBody25(nn.Module):
         x2 = torch.cat((y0, y2, paf), 1)
         heatmap = self.blk21(x2)
 
-        return heatmap, paf
+        return torch.cat((heatmap, paf), 1)
