@@ -2,6 +2,9 @@ import torch
 from torch import nn
 from collections import OrderedDict
 
+NUM_JOINTS = 25
+NUM_HEATMAP = 26
+NUM_PAF = 52
 
 class SubBlock(nn.Module):
     def __init__(self, in_channels, growth_rate):
