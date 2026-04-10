@@ -28,8 +28,8 @@ if __name__ == '__main__':
                     X = (x2d - K[0, 2]) * z / K[0, 0]
                     Y = (y2d - K[1, 2]) * z / K[1, 1]
 
-        draw_body_pose(color_img, skels)
-        cv2.imshow("D435i + OpenPose", color_img)
+        debug_img = draw_body_pose(color_img, skels)
+        cv2.imshow("D435i + OpenPose", debug_img)
 
         if cv2.waitKey(1) & 0xFF == 27:
             break

@@ -1,8 +1,10 @@
 import math
+import time
 
 import cv2
 import numpy as np
 import torch
+from torch.nn.functional import max_pool2d
 from torchvision.transforms.functional import gaussian_blur
 
 from .dtype import Joint, Skeleton
@@ -22,27 +24,20 @@ map2str = ["Nose", "Neck", "RShoulder", "RElbow", "RWrist", "LShoulder", "LElbow
            "RBigToe", "RSmallToe", "RHeel", "Background"]
 
 
-def draw_body_pose(img: np.ndarray, skeletons: list[Skeleton]):
+def draw_body_pose(img: np.ndarray, skeletons: list[Skeleton]) -> np.ndarray:
     stick_width = 4
-
     colors = [[255, 0, 0], [255, 85, 0], [255, 170, 0], [255, 255, 0], [170, 255, 0], [85, 255, 0], [0, 255, 0],
               [0, 255, 85], [0, 255, 170], [0, 255, 255], [0, 170, 255], [0, 85, 255], [0, 0, 255], [85, 0, 255],
               [170, 0, 255], [255, 0, 255], [255, 0, 170], [255, 0, 85], [255, 255, 0], [255, 255, 85], [255, 255, 170],
               [255, 255, 255], [170, 255, 255], [85, 255, 255], [0, 255, 255]]
 
-    for skel in skeletons:
-        for joint, color in zip(skel.joints, colors):
-            if joint.score < 0.1:
-                continue
-            cv2.circle(img, joint.get_image_coord(), 4, color, thickness=-1)
-
+    res = img.copy()
     for skel in skeletons:
         for limb, color in zip(map2joints, colors):
             joint0 = skel[limb[0]]
             joint1 = skel[limb[1]]
             if joint0.score < 0.1 or joint1.score < 0.1:
                 continue
-            cur_canvas = img.copy()
             x0, y0 = joint0.get_image_coord()
             x1, y1 = joint1.get_image_coord()
             dx = x1 - x0
@@ -51,14 +46,21 @@ def draw_body_pose(img: np.ndarray, skeletons: list[Skeleton]):
             angle = math.degrees(math.atan2(dy, dx))
             polygon = cv2.ellipse2Poly(((x0 + x1) // 2, (y0 + y1) // 2), (int(length / 2), stick_width), int(angle), 0,
                                        360, 1)
-            cv2.fillConvexPoly(cur_canvas, polygon, color)
-            img = cv2.addWeighted(img, 0.4, cur_canvas, 0.6, 0)
+            cv2.fillConvexPoly(res, polygon, color)
 
-    return img
+    res = cv2.addWeighted(res, 0.4, res, 0.6, 0)
+
+    for skel in skeletons:
+        for joint, color in zip(skel.joints, colors):
+            if joint.score < 0.1:
+                continue
+            cv2.circle(res, joint.get_image_coord(), 4, color, thickness=-1)
+
+    return res
 
 
 def pad_down_right_corner(img: np.ndarray) -> np.ndarray:
-    stride = 8
+    stride = 16
     pad_val = 128
 
     h, w, _ = img.shape
@@ -70,13 +72,12 @@ def pad_down_right_corner(img: np.ndarray) -> np.ndarray:
     return cv2.copyMakeBorder(img, 0, pad_d, 0, pad_r, cv2.BORDER_CONSTANT, value=(pad_val, pad_val, pad_val))
 
 
-def img2tsr(img: np.ndarray) -> torch.Tensor:
-    padded_img = pad_down_right_corner(img)
-    data = np.transpose(np.float32(padded_img), (2, 0, 1)) / 256 - 0.5  # H, W, C -> C, H, W
+def img2tsr(img: np.ndarray, wh) -> torch.Tensor:
+    resized = cv2.resize(img, wh)
+    padded = pad_down_right_corner(resized)
+    data = np.transpose(np.float32(padded), (2, 0, 1)) / 256 - 0.5  # H, W, C -> C, H, W
     data = np.ascontiguousarray(data)  # 内存连续
-
-    tsr = torch.from_numpy(data)
-    return tsr.unsqueeze_(0)
+    return torch.from_numpy(data).unsqueeze_(0)
 
 
 def postprocess_output(output, hw):
@@ -88,21 +89,22 @@ def postprocess_output(output, hw):
 # return (NUM_JOINTS, matched_joints)
 def nms_heatmap(heatmaps: torch.Tensor, threshold: float):
     smooth = gaussian_blur(heatmaps[:25], kernel_size=[5, 5])
-    mask = smooth > threshold
+    pool = max_pool2d(smooth, kernel_size=3, stride=1, padding=1)
+    mask = (smooth > threshold) & (smooth == pool)
 
-    mask[:, 1:, :] &= smooth[:, 1:, :] >= smooth[:, :-1, :]
-    mask[:, :-1, :] &= smooth[:, :-1, :] >= smooth[:, 1:, :]
-    mask[:, :, 1:] &= smooth[:, :, 1:] >= smooth[:, :, :-1]
-    mask[:, :, :-1] &= smooth[:, :, :-1] >= smooth[:, :, 1:]
+    indices = torch.nonzero(mask, as_tuple=True)
+    scores = heatmaps[indices]
 
-    indices = torch.nonzero(mask)
-    scores = heatmaps[indices[:, 0], indices[:, 1], indices[:, 2]]
-    indices = indices.cpu().numpy()
+    indices = tuple(idx.cpu().numpy() for idx in indices)
     scores = scores.cpu().numpy()
 
     joints = [[] for _ in range(25)]
-    for i, idx in enumerate(indices):
-        joints[idx[0]].append(Joint(idx[2].item(), idx[1].item(), scores[i].item()))
+    for i in range(len(scores)):
+        j = indices[0][i]
+        y = indices[1][i]
+        x = indices[2][i]
+        s = scores[i]
+        joints[j].append(Joint(x, y, s))
 
     return joints
 
@@ -122,7 +124,7 @@ class Limb:
 # return (NUM_LIMBS, matched_limbs)
 def match_limbs(joints, paf: torch.Tensor, threshold):
     limbs = []
-    paf = paf.cpu().numpy()
+    paf = paf.to("cpu", non_blocking=True).numpy()
 
     # 用关节点向量和paf匹配，得到候选（candidate）躯干
     for joints_idx, paf_idx in zip(map2joints, map2paf):
