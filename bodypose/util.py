@@ -1,5 +1,4 @@
 import math
-import time
 
 import cv2
 import numpy as np
@@ -31,7 +30,7 @@ def draw_body_pose(img: np.ndarray, skeletons: list[Skeleton]) -> np.ndarray:
               [170, 0, 255], [255, 0, 255], [255, 0, 170], [255, 0, 85], [255, 255, 0], [255, 255, 85], [255, 255, 170],
               [255, 255, 255], [170, 255, 255], [85, 255, 255], [0, 255, 255]]
 
-    res = img.copy()
+    mask = img.copy()
     for skel in skeletons:
         for limb, color in zip(map2joints, colors):
             joint0 = skel[limb[0]]
@@ -46,17 +45,17 @@ def draw_body_pose(img: np.ndarray, skeletons: list[Skeleton]) -> np.ndarray:
             angle = math.degrees(math.atan2(dy, dx))
             polygon = cv2.ellipse2Poly(((x0 + x1) // 2, (y0 + y1) // 2), (int(length / 2), stick_width), int(angle), 0,
                                        360, 1)
-            cv2.fillConvexPoly(res, polygon, color)
+            cv2.fillConvexPoly(mask, polygon, color)
 
-    res = cv2.addWeighted(res, 0.4, res, 0.6, 0)
+    cv2.addWeighted(img, 0.4, mask, 0.6, 0, dst=img)
 
     for skel in skeletons:
         for joint, color in zip(skel.joints, colors):
             if joint.score < 0.1:
                 continue
-            cv2.circle(res, joint.get_image_coord(), 4, color, thickness=-1)
+            cv2.circle(img, joint.get_image_coord(), 4, color, thickness=-1)
 
-    return res
+    return img
 
 
 def pad_down_right_corner(img: np.ndarray) -> np.ndarray:
