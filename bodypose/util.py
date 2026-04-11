@@ -123,6 +123,7 @@ class Limb:
 
 # return (NUM_LIMBS, matched_limbs)
 def match_limbs(joints, paf: torch.Tensor, threshold):
+    num_dx = 10
     limbs = []
     paf = paf.to("cpu", non_blocking=True).numpy()
 
@@ -146,7 +147,6 @@ def match_limbs(joints, paf: torch.Tensor, threshold):
                     vec = np.divide(vec, norm)
 
                     # 积分
-                    num_dx = 10
                     bound = zip(np.linspace(joint0.x, joint1.x, num=num_dx),
                                 np.linspace(joint0.y, joint1.y, num=num_dx))
                     vec_paf = np.array([paf_xy[:, int(round(y)), int(round(x))] for x, y in bound])
@@ -154,7 +154,7 @@ def match_limbs(joints, paf: torch.Tensor, threshold):
                     integral = cos_vec.mean().item()
 
                     score = integral  # + min(ori_img_w / 2. / norm - 1., 0.)
-                    if score > 0. and len(np.argwhere(cos_vec > threshold)) > 0.8 * num_dx:
+                    if score > 0. and np.sum(cos_vec > threshold) > 0.8 * num_dx:
                         cand_limbs.append(Limb(joint0, joint1, score))
 
             cand_limbs = sorted(cand_limbs, key=lambda x: x.score, reverse=True)

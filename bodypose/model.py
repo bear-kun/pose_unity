@@ -6,6 +6,7 @@ NUM_JOINTS = 25
 NUM_HEATMAP = 26
 NUM_PAF = 52
 
+
 class SubBlock(nn.Module):
     def __init__(self, in_channels, growth_rate):
         super(SubBlock, self).__init__()
@@ -24,14 +25,13 @@ class SubBlock(nn.Module):
 
 
 def block(in_channels, growth_rate, hidden_channels, out_channels):
-    midway_in_channels = 3 * growth_rate
     return nn.Sequential(OrderedDict(
         sub0=SubBlock(in_channels, growth_rate),
-        sub1=SubBlock(midway_in_channels, growth_rate),
-        sub2=SubBlock(midway_in_channels, growth_rate),
-        sub3=SubBlock(midway_in_channels, growth_rate),
-        sub4=SubBlock(midway_in_channels, growth_rate),
-        conv0=nn.Conv2d(midway_in_channels, hidden_channels, 1),
+        sub1=SubBlock(3 * growth_rate, growth_rate),
+        sub2=SubBlock(3 * growth_rate, growth_rate),
+        sub3=SubBlock(3 * growth_rate, growth_rate),
+        sub4=SubBlock(3 * growth_rate, growth_rate),
+        conv0=nn.Conv2d(3 * growth_rate, hidden_channels, 1),
         prelu0=nn.PReLU(num_parameters=hidden_channels),
         conv1=nn.Conv2d(hidden_channels, out_channels, 1)))
 
